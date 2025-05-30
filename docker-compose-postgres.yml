@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  postgres_primary:
+    image: bitnami/postgresql:15
+    container_name: postgres_primary
+    restart: always
+    environment:
+      POSTGRESQL_REPLICATION_MODE: master
+      POSTGRESQL_USERNAME: postgres
+      POSTGRESQL_PASSWORD: your_actual_password
+      POSTGRESQL_REPLICATION_USER: repl_user
+      POSTGRESQL_REPLICATION_PASSWORD: replsecurepassword
+      POSTGRESQL_DATABASE: your_postgres_db
+      POSTGRESQL_ENABLE_SSL: "true"
+      POSTGRESQL_SSL_CERT_FILE: /certs-volume/postgres.crt
+      POSTGRESQL_SSL_KEY_FILE: /certs-volume/postgres.key
+    ports:
+      - "5432:5432"
+    networks:
+      - internal_network
+    volumes:
+      - primary_data:/bitnami/postgresql
+      - ../../pgpool/config/postgresql.conf:/bitnami/postgresql/conf/postgresql.conf:ro
+      - certs-volume:/certs-volume:rw
+      - ../../db-backup:/pgbackrest_repo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  internal_network:
+    name: internal_network
+    external: true
+
+volumes:
+  primary_data:
+  replica_data:
+  certs-volume:
+    external: true

@@ -1,0 +1,188 @@
+version: '3.8'  # Ensure this is at the top
+
+services:
+  setup_dns:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile.setup_dns
+    network_mode: host
+    container_name: app
+    command: bash /setup_local_dns.sh
+    restart: "no"
+
+  app:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ENVIRONMENT}
+      - ConnectionStrings__DefaultConnection=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_haworksContext=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_ProductContext=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_OrderContext=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_ContentContext=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_Redis=redis://redis-master:6379,ssl=true,password=your_redis_password
+      - Elasticsearch__Uri=http://elasticsearch:9200   
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - RabbitMq__Host=rabbitmq
+      - ClamAV__Host=clamav  
+      - ClamAV__Port=3310
+      - VAULT_ROOT_TOKEN=${VAULT_ROOT_TOKEN}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+    volumes:
+      - ../../vault/secrets:/vault/secrets
+      - ../../app_logs:/logs
+      - ../../scripts:/scripts
+      - certs-volume:/certs-volume:rw  
+    networks:
+      - internal_network
+      - external_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      - setup_dns
+      - db_migrations 
+    extra_hosts:
+      - "api.local.ritualworks.com:127.0.0.1"
+  
+  clamav_rest:
+    image: clamav/clamav:1.0
+    ports:
+      - "8080:8080"
+    depends_on:
+      - clamav
+    environment:
+      - CLAMD_HOST=clamav
+      - CLAMD_PORT=3310
+
+  clamav:
+    image: clamav/clamav:latest
+    ports:
+      - "3310:3310"
+
+  db_migrations:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile.migrations
+    environment:
+      - ConnectionStrings__DefaultConnection=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_haworksContext=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_ProductContext=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_OrderContext=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_ContentContext=Host=postgres_primary;Port=5432;Database=your_postgres_db;Username=postgres;Password=your_actual_password;SSL Mode=Require
+      - ConnectionStrings_Redis=redis://redis-master:6379,ssl=true,password=your_redis_password
+      - VAULT_ROOT_TOKEN=${VAULT_ROOT_TOKEN}
+      - POSTGRES_USERNAME=postgres
+      - POSTGRES_PASSWORD=your_actual_password
+      - POSTGRES_DB=your_postgres_db
+      - POSTGRES_HOST=postgres_primary
+    volumes:
+      - ../../vault/secrets:/vault/secrets
+      - ../../scripts:/scripts
+      - certs-volume:/certs-volume:rw
+    entrypoint: ["/bin/bash", "-c"]
+    command: "/scripts/db_migrations.sh"
+
+    networks:
+      - internal_network
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../../config/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - internal_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:9090/-/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 120s
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../../grafana-data:/var/lib/grafana
+      - ../../provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ../../provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ../../dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_PROVISIONING_DEBUG=true
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin  # Change this for security
+    networks:
+      - internal_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 120s    
+
+  nginx:
+    image: nginx:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../../nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ../../nginx/ssl:/etc/nginx/ssl
+      - ../../nginx/conf.d/:/etc/nginx/conf.d/:ro
+      - ../../nginx_logs:/var/log/nginx
+      - certs-volume:/certs-volume:rw  
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+    networks:
+      - external_network
+      - internal_network
+
+  verify_dns_and_access:
+    image: busybox
+    volumes:
+      - ../../scripts/verify_dns_and_access.sh:/verify_dns_and_access.sh
+    depends_on:
+      - nginx
+    command: sh /verify_dns_and_access.sh
+    network_mode: host
+
+networks:
+  internal_network:
+    name: internal_network
+    external: true
+    ipam:
+      config:
+        - subnet: 172.22.0.0/16
+  external_network:
+    name: external_network
+    external: true
+    ipam:
+      config:
+        - subnet: 172.23.0.0/16
+
+volumes:
+  grafana-data:
+    driver: local
+  certs-volume:
+    external: true
+  vault-secrets:
+    external: true
